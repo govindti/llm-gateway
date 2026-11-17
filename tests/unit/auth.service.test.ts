@@ -69,10 +69,10 @@ class FakeCache implements CacheStore {
 }
 
 const silentLogger = {
-    debug: () => {},
-    info: () => {},
-    warn: () => {},
-    error: () => {},
+    debug: () => { },
+    info: () => { },
+    warn: () => { },
+    error: () => { },
     child: () => silentLogger,
 };
 

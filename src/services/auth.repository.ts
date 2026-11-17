@@ -3,7 +3,7 @@ import type { ApiKeyCreateInput, ApiKeyRecord, AuthRepository } from "./auth.con
 
 /** Postgres-backed credential store. */
 export class PrismaAuthRepository implements AuthRepository {
-    constructor(private readonly db: PrismaClient) {}
+    constructor(private readonly db: PrismaClient) { }
 
     async findByHash(keyHash: string): Promise<ApiKeyRecord | null> {
         return this.db.apiKey.findUnique({ where: { keyHash } });

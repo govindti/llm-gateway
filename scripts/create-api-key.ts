@@ -49,8 +49,8 @@ if (days !== undefined && (!Number.isInteger(days) || days < 1)) usage("--days m
 // This command only issues keys, so no cache or Redis connection is needed.
 const noCache: CacheStore = {
     get: async () => null,
-    set: async () => {},
-    delete: async () => {},
+    set: async () => { },
+    delete: async () => { },
 };
 
 const authService = new AuthService(new PrismaAuthRepository(prisma), noCache, {

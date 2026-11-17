@@ -13,7 +13,8 @@ import { randomUUID } from "node:crypto";
  */
 
 const runId = randomUUID().slice(0, 8);
-const key = (name: string) => `smoke-${name}-${runId}-key`;
+/** Static admin key from API_KEYS: the bootstrap credential used to mint real keys. */
+const adminKey = `smoke-admin-${runId}`;
 
 let upstreamCalls = 0;
 
@@ -66,8 +67,8 @@ Object.assign(process.env, {
     RATE_LIMIT_FAIL_OPEN: "false",
     CACHE_ENABLED: "true",
     CACHE_TTL_SECONDS: "3600",
-    ALLOW_CROSS_KEY_USAGE: "false",
-    API_KEYS: "",
+    API_KEYS: adminKey,
+    AUTH_CACHE_TTL_SECONDS: "60",
     DATABASE_URL: process.env.DATABASE_URL ?? "postgresql://gateway:gateway@localhost:5432/llm_gateway",
     REDIS_URL: process.env.REDIS_URL ?? "redis://localhost:6379",
 });
@@ -131,6 +132,20 @@ async function call(
     return { status: response.status, body, headers: response.headers };
 }
 
+/** Mints a member credential through the admin API, exactly as a real client would. */
+async function mintMemberKey(name: string): Promise<string> {
+    const response = await call("/auth/keys", {
+        apiKey: adminKey,
+        body: { name: `${name}-${runId}` },
+    });
+
+    if (response.status !== 201) {
+        throw new Error(`failed to mint key "${name}": ${JSON.stringify(response.body)}`);
+    }
+
+    return response.body.apiKey as string;
+}
+
 try {
     // --------------------------------------------------------------------- health
     const health = await call("/health");
@@ -145,7 +160,7 @@ try {
     );
 
     // ----------------------------------------------------- primary provider + tokens
-    const chatKey = key("chat");
+    const chatKey = await mintMemberKey("chat");
     const prompt = `hello gateway ${runId}`;
 
     const first = await call("/chat", { apiKey: chatKey, body: { prompt, provider: "openai" } });
@@ -180,7 +195,7 @@ try {
     check("usage cost is aggregated", typeof usage.body?.totalEstimatedCostUsd === "number" && usage.body.totalEstimatedCostUsd > 0, usage.body?.totalEstimatedCostUsd);
     check("usage key is masked", typeof usage.body?.apiKey === "string" && usage.body.apiKey.startsWith("***"), usage.body?.apiKey);
 
-    const crossKey = await call(`/usage/${chatKey}`, { apiKey: key("intruder") });
+    const crossKey = await call(`/usage/${chatKey}`, { apiKey: await mintMemberKey("intruder") });
     check(
         "cross-key usage is forbidden",
         crossKey.status === 403 && crossKey.body?.error?.code === "usage_forbidden",
@@ -188,7 +203,7 @@ try {
     );
 
     // ------------------------------------------------------------------- fallback
-    const fallbackKey = key("fallback");
+    const fallbackKey = await mintMemberKey("fallback");
     const fallback = await call("/chat", {
         apiKey: fallbackKey,
         body: { prompt: `FAIL_PRIMARY ${runId}`, provider: "openai" },
@@ -206,7 +221,7 @@ try {
     );
 
     // -------------------------------------------------------------------- timeout
-    const timeoutKey = key("timeout");
+    const timeoutKey = await mintMemberKey("timeout");
     const timeoutStartedAt = Date.now();
     const timeout = await call("/chat", {
         apiKey: timeoutKey,
@@ -222,7 +237,7 @@ try {
     check("deadline is enforced", timeoutElapsed < 1_200, { timeoutElapsed });
 
     // ---------------------------------------------------------------- rate limiting
-    const rateLimitKey = key("ratelimit");
+    const rateLimitKey = await mintMemberKey("ratelimit");
     let allowed = 0;
     let blocked: ApiResponse | undefined;
 
@@ -247,7 +262,8 @@ try {
     check("429 includes a Retry-After header", Number(blocked?.headers.get("retry-after") ?? 0) > 0, blocked?.headers.get("retry-after"));
 
     // ---------------------------------------------------------------- validation
-    const emptyPrompt = await call("/chat", { apiKey: key("validation"), body: { prompt: "   ", provider: "openai" } });
+    const validationKey = await mintMemberKey("validation");
+    const emptyPrompt = await call("/chat", { apiKey: validationKey, body: { prompt: "   ", provider: "openai" } });
     check(
         "empty prompt is a 400",
         emptyPrompt.status === 400 && emptyPrompt.body?.error?.code === "validation_error",
@@ -255,13 +271,100 @@ try {
     );
 
     const badProvider = await call("/chat", {
-        apiKey: key("validation"),
+        apiKey: validationKey,
         body: { prompt: "hi", provider: "anthropic" },
     });
     check("unknown provider is a 400", badProvider.status === 400, badProvider.body);
 
     const unknownRoute = await call("/does-not-exist");
     check("unknown route is a 404", unknownRoute.status === 404 && unknownRoute.body?.error?.code === "route_not_found", unknownRoute.body);
+
+    // --------------------------------------------------------------- auth mgmt
+    const adminMe = await call("/auth/me", { apiKey: adminKey });
+    check(
+        "static env key resolves to an admin identity",
+        adminMe.status === 200 && adminMe.body?.role === "admin" && adminMe.body?.static === true,
+        adminMe.body,
+    );
+
+    const memberMe = await call("/auth/me", { apiKey: chatKey });
+    check(
+        "GET /auth/me reports the caller identity",
+        memberMe.status === 200 && memberMe.body?.role === "member" && memberMe.body?.static === false,
+        memberMe.body,
+    );
+    check(
+        "identity exposes the key prefix, never the secret",
+        typeof memberMe.body?.keyPrefix === "string" &&
+        memberMe.body.keyPrefix.startsWith("llmgw_sk_") &&
+        !JSON.stringify(memberMe.body).includes(chatKey),
+        memberMe.body,
+    );
+
+    const issued = await call("/auth/keys", {
+        apiKey: adminKey,
+        body: { name: `scoped-${runId}`, role: "member", expiresInDays: 7 },
+    });
+    check(
+        "admin mints a scoped key",
+        issued.status === 201 && typeof issued.body?.apiKey === "string" && issued.body.apiKey.startsWith("llmgw_sk_"),
+        issued.body,
+    );
+    check("minting never echoes the hash", issued.body?.keyHash === undefined, issued.body);
+    check("issued key carries its expiry", typeof issued.body?.expiresAt === "string", issued.body?.expiresAt);
+
+    const scopedChat = await call("/chat", {
+        apiKey: issued.body.apiKey,
+        body: { prompt: `scoped hello ${runId}`, provider: "openai" },
+    });
+    check("a freshly minted key can call /chat", scopedChat.status === 200, scopedChat.body);
+
+    const listing = await call("/auth/keys", { apiKey: adminKey });
+    check(
+        "admin lists every key",
+        listing.status === 200 && Array.isArray(listing.body?.keys) && listing.body.keys.length >= 3,
+        listing.body,
+    );
+    check(
+        "listing never leaks secrets or hashes",
+        !JSON.stringify(listing.body).includes(issued.body.apiKey) &&
+        listing.body.keys.every((key: any) => key.keyHash === undefined),
+        listing.body,
+    );
+
+    const memberMint = await call("/auth/keys", { apiKey: chatKey, body: { name: `nope-${runId}` } });
+    check(
+        "members cannot mint keys",
+        memberMint.status === 403 && memberMint.body?.error?.code === "insufficient_role",
+        memberMint.body,
+    );
+    check(
+        "members cannot list keys",
+        (await call("/auth/keys", { apiKey: chatKey })).status === 403,
+    );
+
+    // Prime the validation cache, so the 401 after revocation proves the entry is dropped.
+    await call("/auth/me", { apiKey: issued.body.apiKey });
+    const revoked = await call(`/auth/keys/${issued.body.id}`, { method: "DELETE", apiKey: adminKey });
+    check(
+        "admin revokes a key",
+        revoked.status === 200 && revoked.body?.revoked === true && revoked.body?.key?.active === false,
+        revoked.body,
+    );
+
+    const afterRevoke = await call("/auth/me", { apiKey: issued.body.apiKey });
+    check(
+        "revoked key is rejected immediately",
+        afterRevoke.status === 401 && afterRevoke.body?.error?.code === "invalid_api_key",
+        afterRevoke.body,
+    );
+
+    const unknownKey = await call("/auth/me", { apiKey: `llmgw_sk_${randomUUID().replace(/-/g, "")}` });
+    check(
+        "unknown well-formed keys are rejected",
+        unknownKey.status === 401 && unknownKey.body?.error?.code === "invalid_api_key",
+        unknownKey.body,
+    );
 
     // -------------------------------------------------------------- persistence
     const rows = await prisma.apiUsage.findMany({ where: { apiKey: chatKey }, orderBy: { timestamp: "asc" } });
