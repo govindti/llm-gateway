@@ -1,0 +1,54 @@
+// Prisma schema for the LLM Gateway.
+// One row is written per /chat request (successful, cache-served or failed).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model ApiUsage {
+  id             String   @id @default(cuid())
+  apiKey         String
+  provider       String
+  model          String   @default("unknown")
+  promptTokens   Int      @default(0)
+  responseTokens Int      @default(0)
+  /// Estimated USD cost. Cached responses are recorded as 0 because no tokens were billed.
+  estimatedCost  Decimal  @default(0) @db.Decimal(18, 8)
+  /// "success" | "cached" | "error"
+  status         String   @default("success")
+  cached         Boolean  @default(false)
+  fallback       Boolean  @default(false)
+  latencyMs      Int      @default(0)
+  requestId      String?
+  timestamp      DateTime @default(now())
+
+  @@index([apiKey, timestamp])
+  @@index([provider, timestamp])
+  @@map("ApiUsage")
+}
+
+/// Caller credentials. Only the SHA-256 hash of a key is stored, never the key itself.
+model ApiKey {
+  id         String    @id @default(cuid())
+  name       String
+  /// Public identifier shown in listings, e.g. "llmgw_sk_A1b2C3".
+  keyPrefix  String
+  /// SHA-256 of the full key; the plaintext key is returned once at creation.
+  keyHash    String    @unique
+  /// "admin" | "member"
+  role       String    @default("member")
+  active     Boolean   @default(true)
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([keyPrefix])
+  @@index([active, expiresAt])
+  @@map("ApiKey")
+}

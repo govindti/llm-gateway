@@ -1,0 +1,44 @@
+{
+    "name": "llm-gateway",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Multi-provider LLM gateway with Redis rate limiting, response caching, Postgres usage accounting and provider fallback.",
+    "type": "module",
+    "module": "src/index.ts",
+    "engines": {
+        "bun": ">=1.2.0"
+    },
+    "scripts": {
+        "dev": "bun --watch src/index.ts",
+        "start": "bun src/index.ts",
+        "build": "bun build src/index.ts --target bun --outdir dist --minify",
+        "typecheck": "tsc --noEmit",
+        "test": "bun test",
+        "test:watch": "bun test --watch",
+        "smoke": "bun scripts/smoke.ts",
+        "auth:key": "bun scripts/create-api-key.ts",
+        "db:generate": "bunx prisma generate",
+        "db:migrate": "bunx prisma migrate dev",
+        "db:deploy": "bunx prisma migrate deploy",
+        "db:push": "bunx prisma db push",
+        "db:studio": "bunx prisma studio",
+        "infra:up": "docker compose up -d",
+        "infra:down": "docker compose down",
+        "infra:logs": "docker compose logs -f"
+    },
+    "dependencies": {
+        "@prisma/client": "^6.16.2",
+        "cors": "^2.8.5",
+        "express": "^5.1.0",
+        "helmet": "^8.1.0",
+        "ioredis": "^5.8.1",
+        "zod": "^4.1.5"
+    },
+    "devDependencies": {
+        "@types/bun": "latest",
+        "@types/cors": "^2.8.19",
+        "@types/express": "^5.0.3",
+        "prisma": "^6.16.2",
+        "typescript": "^5.9.2"
+    }
+}
